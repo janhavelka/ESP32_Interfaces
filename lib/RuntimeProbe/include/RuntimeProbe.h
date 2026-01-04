@@ -136,6 +136,10 @@ class RuntimeProbe {
   bool parseUint32(const char *s, uint32_t *out) const;
   bool parseByte(const char *s, uint8_t *out, char *err, size_t errLen) const;
   bool parseI2cAddress(const char *s, uint8_t *out, char *err, size_t errLen) const;
+  bool defaultUartPins(uint8_t num, int *txPin, int *rxPin, char *err, size_t errLen) const;
+  bool defaultI2cPins(int *sdaPin, int *sclPin, char *err, size_t errLen) const;
+  bool defaultSpiPins(int *sckPin, int *misoPin, int *mosiPin, int *csPin,
+                      char *err, size_t errLen) const;
 
   void gpioReleasePin();
   bool gpioEnsureClaimed(char *err, size_t errLen);
@@ -163,6 +167,7 @@ class RuntimeProbe {
   void printHelp() const;
   void printStatus() const;
   void printPins() const;
+  void printDefaults() const;
   bool parseSeqBits(const char *input, char *err, size_t errLen);
   bool handleCommand(int argc, char *argv[], char *err, size_t errLen);
   void handleConsole();

@@ -193,6 +193,70 @@ bool RuntimeProbe::parseI2cAddress(const char *s, uint8_t *out, char *err, size_
   return true;
 }
 
+bool RuntimeProbe::defaultUartPins(uint8_t num, int *txPin, int *rxPin, char *err, size_t errLen) const {
+  if (num == 0) {
+#if defined(TX) && defined(RX)
+    *txPin = TX;
+    *rxPin = RX;
+    return true;
+#else
+    snprintf(err, errLen, "default UART0 pins not defined");
+    return false;
+#endif
+  }
+  if (num == 1) {
+#if defined(TX1) && defined(RX1)
+    *txPin = TX1;
+    *rxPin = RX1;
+    return true;
+#else
+    snprintf(err, errLen, "default UART1 pins not defined");
+    return false;
+#endif
+  }
+  if (num == 2) {
+#if defined(TX2) && defined(RX2)
+    *txPin = TX2;
+    *rxPin = RX2;
+    return true;
+#else
+    snprintf(err, errLen, "default UART2 pins not defined");
+    return false;
+#endif
+  }
+  snprintf(err, errLen, "uart num must be 0, 1, or 2");
+  return false;
+}
+
+bool RuntimeProbe::defaultI2cPins(int *sdaPin, int *sclPin, char *err, size_t errLen) const {
+#if defined(SDA) && defined(SCL)
+  *sdaPin = SDA;
+  *sclPin = SCL;
+  return true;
+#else
+  snprintf(err, errLen, "default I2C pins not defined");
+  return false;
+#endif
+}
+
+bool RuntimeProbe::defaultSpiPins(int *sckPin, int *misoPin, int *mosiPin, int *csPin,
+                                  char *err, size_t errLen) const {
+#if defined(SCK) && defined(MISO) && defined(MOSI)
+  *sckPin = SCK;
+  *misoPin = MISO;
+  *mosiPin = MOSI;
+#if defined(SS)
+  *csPin = SS;
+#else
+  *csPin = -1;
+#endif
+  return true;
+#else
+  snprintf(err, errLen, "default SPI pins not defined");
+  return false;
+#endif
+}
+
 void RuntimeProbe::gpioReleasePin() {
   if (!gpio_.pinClaimed || gpio_.pin < 0) {
     gpio_.wave = GpioState::None;
@@ -550,6 +614,7 @@ void RuntimeProbe::printHelp() const {
   Serial.println("  help");
   Serial.println("  status");
   Serial.println("  pins");
+  Serial.println("  defaults");
   Serial.println("  mode off|gpio|uart|jtag|spi|i2c|pwm");
   Serial.println("  gpio set <pin>");
   Serial.println("  gpio toggle <freq_hz>");
@@ -559,6 +624,8 @@ void RuntimeProbe::printHelp() const {
   Serial.println("  gpio stop");
   Serial.println("  uart force <0|1>");
   Serial.println("  uart start <num> <tx_pin> <rx_pin> <baud>");
+  Serial.println("  uart start <num> <baud>  (default pins)");
+  Serial.println("  uart start <num> default <baud>");
   Serial.println("  uart pattern 55|aa|ramp|ascii");
   Serial.println("  uart txrate <bytes_per_sec>");
   Serial.println("  uart echo <0|1>");
@@ -567,6 +634,7 @@ void RuntimeProbe::printHelp() const {
   Serial.println("  jtag seq <bits_or_hex>  (pairs: TMS then TDI)");
   Serial.println("  jtag stop");
   Serial.println("  i2c start <sda> <scl> [freq_hz] [timeout_ms]");
+  Serial.println("  i2c start default [freq_hz] [timeout_ms]");
   Serial.println("  i2c freq <hz>");
   Serial.println("  i2c timeout <ms>");
   Serial.println("  i2c scan [start] [end] | stop");
@@ -575,6 +643,7 @@ void RuntimeProbe::printHelp() const {
   Serial.println("  i2c writeread <addr> <len> <byte...>");
   Serial.println("  i2c stop");
   Serial.println("  spi start <sck> <miso> <mosi> [cs]");
+  Serial.println("  spi start default [cs]");
   Serial.println("  spi freq <hz>");
   Serial.println("  spi mode <0|1|2|3>");
   Serial.println("  spi order msb|lsb");
@@ -651,6 +720,40 @@ void RuntimeProbe::printPins() const {
   Serial.println("Pins outside 0..48 are accepted with a warning.");
   Serial.println("Claimed pins:");
   pins_.printClaims();
+}
+
+void RuntimeProbe::printDefaults() const {
+  Serial.println("Default pins:");
+  int tx = -1;
+  int rx = -1;
+  int sda = -1;
+  int scl = -1;
+  int sck = -1;
+  int miso = -1;
+  int mosi = -1;
+  int cs = -1;
+  char err[64] = {0};
+
+  if (defaultUartPins(0, &tx, &rx, err, sizeof(err))) {
+    Serial.printf("  UART0: tx=%d rx=%d\n", tx, rx);
+  } else {
+    Serial.printf("  UART0: %s\n", err);
+  }
+  if (defaultUartPins(1, &tx, &rx, err, sizeof(err))) {
+    Serial.printf("  UART1: tx=%d rx=%d\n", tx, rx);
+  } else {
+    Serial.printf("  UART1: %s\n", err);
+  }
+  if (defaultI2cPins(&sda, &scl, err, sizeof(err))) {
+    Serial.printf("  I2C: sda=%d scl=%d\n", sda, scl);
+  } else {
+    Serial.printf("  I2C: %s\n", err);
+  }
+  if (defaultSpiPins(&sck, &miso, &mosi, &cs, err, sizeof(err))) {
+    Serial.printf("  SPI: sck=%d miso=%d mosi=%d cs=%d\n", sck, miso, mosi, cs);
+  } else {
+    Serial.printf("  SPI: %s\n", err);
+  }
 }
 
 bool RuntimeProbe::parseSeqBits(const char *input, char *err, size_t errLen) {
@@ -760,6 +863,10 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
   }
   if (strcmp(argv[0], "pins") == 0) {
     printPins();
+    return true;
+  }
+  if (strcmp(argv[0], "defaults") == 0) {
+    printDefaults();
     return true;
   }
 
@@ -958,18 +1065,42 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
       return true;
     }
     if (strcmp(argv[1], "start") == 0) {
-      if (argc < 6) {
-        snprintf(err, errLen, "uart start <num> <tx_pin> <rx_pin> <baud>");
+      if (argc < 4) {
+        snprintf(err, errLen, "uart start <num> <tx_pin> <rx_pin> <baud> | default <baud>");
         return false;
       }
       int num = 0;
-      int txPin = 0;
-      int rxPin = 0;
+      int txPin = -1;
+      int rxPin = -1;
       uint32_t baud = 0;
-      if (!parseInt(argv[2], &num) || !parseInt(argv[3], &txPin) ||
-          !parseInt(argv[4], &rxPin) || !parseUint32(argv[5], &baud)) {
-        snprintf(err, errLen, "invalid uart parameters");
+      bool useDefaults = false;
+
+      if (!parseInt(argv[2], &num)) {
+        snprintf(err, errLen, "invalid uart num");
         return false;
+      }
+      if (argc == 4) {
+        if (!parseUint32(argv[3], &baud)) {
+          snprintf(err, errLen, "invalid baud");
+          return false;
+        }
+        useDefaults = true;
+      } else if (argc == 5 && strcmp(argv[3], "default") == 0) {
+        if (!parseUint32(argv[4], &baud)) {
+          snprintf(err, errLen, "invalid baud");
+          return false;
+        }
+        useDefaults = true;
+      } else {
+        if (argc < 6) {
+          snprintf(err, errLen, "uart start <num> <tx_pin> <rx_pin> <baud>");
+          return false;
+        }
+        if (!parseInt(argv[3], &txPin) || !parseInt(argv[4], &rxPin) ||
+            !parseUint32(argv[5], &baud)) {
+          snprintf(err, errLen, "invalid uart parameters");
+          return false;
+        }
       }
       if (num < 0 || num > 2) {
         snprintf(err, errLen, "uart num must be 0, 1, or 2");
@@ -978,6 +1109,11 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
       if (num == 0 && !uart_.forceUart0) {
         snprintf(err, errLen, "uart0 requires 'uart force 1'");
         return false;
+      }
+      if (useDefaults) {
+        if (!defaultUartPins(static_cast<uint8_t>(num), &txPin, &rxPin, err, errLen)) {
+          return false;
+        }
       }
       if (txPin == rxPin) {
         snprintf(err, errLen, "tx and rx pins must differ");
@@ -1206,23 +1342,33 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
       return false;
     }
     if (strcmp(argv[1], "start") == 0) {
-      if (argc < 4) {
-        snprintf(err, errLen, "i2c start <sda> <scl> [freq_hz] [timeout_ms]");
-        return false;
-      }
       int sda = -1;
       int scl = -1;
-      if (!parseInt(argv[2], &sda) || !parseInt(argv[3], &scl)) {
-        snprintf(err, errLen, "invalid i2c pins");
-        return false;
-      }
       uint32_t freq = i2c_.freqHz;
       uint32_t timeout = i2c_.timeoutMs;
-      if (argc >= 5 && !parseUint32(argv[4], &freq)) {
+      int argIndex = 2;
+      if (argc == 2 || (argc >= 3 && strcmp(argv[2], "default") == 0)) {
+        argIndex = (argc >= 3 && strcmp(argv[2], "default") == 0) ? 3 : 2;
+        if (!defaultI2cPins(&sda, &scl, err, errLen)) {
+          return false;
+        }
+      } else {
+        if (argc < 4) {
+          snprintf(err, errLen, "i2c start <sda> <scl> [freq_hz] [timeout_ms]");
+          return false;
+        }
+        if (!parseInt(argv[2], &sda) || !parseInt(argv[3], &scl)) {
+          snprintf(err, errLen, "invalid i2c pins");
+          return false;
+        }
+        argIndex = 4;
+      }
+
+      if (argc > argIndex && !parseUint32(argv[argIndex], &freq)) {
         snprintf(err, errLen, "invalid i2c frequency");
         return false;
       }
-      if (argc >= 6 && !parseUint32(argv[5], &timeout)) {
+      if (argc > argIndex + 1 && !parseUint32(argv[argIndex + 1], &timeout)) {
         snprintf(err, errLen, "invalid i2c timeout");
         return false;
       }
@@ -1486,21 +1632,33 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
       return false;
     }
     if (strcmp(argv[1], "start") == 0) {
-      if (argc < 5) {
-        snprintf(err, errLen, "spi start <sck> <miso> <mosi> [cs]");
-        return false;
-      }
       int sck = -1;
       int miso = -1;
       int mosi = -1;
       int cs = -1;
-      if (!parseInt(argv[2], &sck) || !parseInt(argv[3], &miso) || !parseInt(argv[4], &mosi)) {
-        snprintf(err, errLen, "invalid spi pins");
-        return false;
+      int argIndex = 2;
+
+      if (argc == 2 || (argc >= 3 && strcmp(argv[2], "default") == 0)) {
+        argIndex = (argc >= 3 && strcmp(argv[2], "default") == 0) ? 3 : 2;
+        if (!defaultSpiPins(&sck, &miso, &mosi, &cs, err, errLen)) {
+          return false;
+        }
+      } else {
+        if (argc < 5) {
+          snprintf(err, errLen, "spi start <sck> <miso> <mosi> [cs]");
+          return false;
+        }
+        if (!parseInt(argv[2], &sck) || !parseInt(argv[3], &miso) || !parseInt(argv[4], &mosi)) {
+          snprintf(err, errLen, "invalid spi pins");
+          return false;
+        }
+        argIndex = 5;
       }
-      if (argc >= 6 && !parseInt(argv[5], &cs)) {
-        snprintf(err, errLen, "invalid cs pin");
-        return false;
+      if (argc > argIndex) {
+        if (!parseInt(argv[argIndex], &cs)) {
+          snprintf(err, errLen, "invalid cs pin");
+          return false;
+        }
       }
       if (!validatePin(sck, err, errLen) || !validatePin(miso, err, errLen) ||
           !validatePin(mosi, err, errLen)) {
