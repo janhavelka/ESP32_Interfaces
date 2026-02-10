@@ -92,6 +92,7 @@ class RuntimeProbe {
     size_t seqIndex = 0;
     uint64_t tdoShift = 0;
     uint8_t tdoCount = 0;
+    uint32_t lastTdoReportMs = 0;
   };
 
   struct I2cState {
@@ -129,6 +130,7 @@ class RuntimeProbe {
   SpiState spi_;
   char lineBuf_[192];
   size_t lineLen_ = 0;
+  bool lineOverflow_ = false;
 
   const char *modeToString(Mode mode) const;
   bool validatePin(int pin, char *err, size_t errLen) const;

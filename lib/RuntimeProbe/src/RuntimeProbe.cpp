@@ -1,12 +1,99 @@
 #include "RuntimeProbe.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include <string.h>
 #include <Wire.h>
 #include <SPI.h>
 #include "soc/soc_caps.h"
 
+#ifndef RUNTIMEPROBE_MAX_CONSOLE_BYTES_PER_UPDATE
+#define RUNTIMEPROBE_MAX_CONSOLE_BYTES_PER_UPDATE 256
+#endif
+
+#ifndef RUNTIMEPROBE_MAX_UART_TX_BYTES_PER_UPDATE
+#define RUNTIMEPROBE_MAX_UART_TX_BYTES_PER_UPDATE 256
+#endif
+
+#ifndef RUNTIMEPROBE_MAX_UART_RX_BYTES_PER_UPDATE
+#define RUNTIMEPROBE_MAX_UART_RX_BYTES_PER_UPDATE 256
+#endif
+
+#ifndef RUNTIMEPROBE_MAX_UART_TX_BUDGET_BYTES
+#define RUNTIMEPROBE_MAX_UART_TX_BUDGET_BYTES 4096
+#endif
+
+#ifndef RUNTIMEPROBE_I2C_MIN_FREQ_HZ
+#define RUNTIMEPROBE_I2C_MIN_FREQ_HZ 1000
+#endif
+
+#ifndef RUNTIMEPROBE_I2C_MAX_FREQ_HZ
+#define RUNTIMEPROBE_I2C_MAX_FREQ_HZ 1000000
+#endif
+
+#ifndef RUNTIMEPROBE_I2C_MIN_TIMEOUT_MS
+#define RUNTIMEPROBE_I2C_MIN_TIMEOUT_MS 1
+#endif
+
+#ifndef RUNTIMEPROBE_I2C_MAX_TIMEOUT_MS
+#define RUNTIMEPROBE_I2C_MAX_TIMEOUT_MS 1000
+#endif
+
+#ifndef RUNTIMEPROBE_JTAG_TDO_REPORT_INTERVAL_MS
+#define RUNTIMEPROBE_JTAG_TDO_REPORT_INTERVAL_MS 100
+#endif
+
+static_assert(RUNTIMEPROBE_MAX_CONSOLE_BYTES_PER_UPDATE > 0,
+              "RUNTIMEPROBE_MAX_CONSOLE_BYTES_PER_UPDATE must be > 0");
+static_assert(RUNTIMEPROBE_MAX_UART_TX_BYTES_PER_UPDATE > 0,
+              "RUNTIMEPROBE_MAX_UART_TX_BYTES_PER_UPDATE must be > 0");
+static_assert(RUNTIMEPROBE_MAX_UART_RX_BYTES_PER_UPDATE > 0,
+              "RUNTIMEPROBE_MAX_UART_RX_BYTES_PER_UPDATE must be > 0");
+static_assert(RUNTIMEPROBE_MAX_UART_TX_BUDGET_BYTES > 0,
+              "RUNTIMEPROBE_MAX_UART_TX_BUDGET_BYTES must be > 0");
+static_assert(RUNTIMEPROBE_I2C_MIN_FREQ_HZ > 0, "RUNTIMEPROBE_I2C_MIN_FREQ_HZ must be > 0");
+static_assert(RUNTIMEPROBE_I2C_MAX_FREQ_HZ >= RUNTIMEPROBE_I2C_MIN_FREQ_HZ,
+              "RUNTIMEPROBE_I2C_MAX_FREQ_HZ must be >= RUNTIMEPROBE_I2C_MIN_FREQ_HZ");
+static_assert(RUNTIMEPROBE_I2C_MIN_TIMEOUT_MS > 0, "RUNTIMEPROBE_I2C_MIN_TIMEOUT_MS must be > 0");
+static_assert(RUNTIMEPROBE_I2C_MAX_TIMEOUT_MS >= RUNTIMEPROBE_I2C_MIN_TIMEOUT_MS,
+              "RUNTIMEPROBE_I2C_MAX_TIMEOUT_MS must be >= RUNTIMEPROBE_I2C_MIN_TIMEOUT_MS");
+static_assert(RUNTIMEPROBE_I2C_MAX_TIMEOUT_MS <= 0xFFFF,
+              "RUNTIMEPROBE_I2C_MAX_TIMEOUT_MS must fit in uint16_t");
+static_assert(RUNTIMEPROBE_JTAG_TDO_REPORT_INTERVAL_MS > 0,
+              "RUNTIMEPROBE_JTAG_TDO_REPORT_INTERVAL_MS must be > 0");
+
 static const size_t kMaxIoBytes = 128;
+static const size_t kMaxConsoleBytesPerUpdate =
+    static_cast<size_t>(RUNTIMEPROBE_MAX_CONSOLE_BYTES_PER_UPDATE);
+static const size_t kMaxUartTxBytesPerUpdate =
+    static_cast<size_t>(RUNTIMEPROBE_MAX_UART_TX_BYTES_PER_UPDATE);
+static const size_t kMaxUartRxBytesPerUpdate =
+    static_cast<size_t>(RUNTIMEPROBE_MAX_UART_RX_BYTES_PER_UPDATE);
+static const uint64_t kMicrosPerSecond = 1000000ULL;
+static const uint64_t kMaxUartTxBudget =
+    static_cast<uint64_t>(RUNTIMEPROBE_MAX_UART_TX_BUDGET_BYTES) * kMicrosPerSecond;
+static const uint32_t kMinI2cFreqHz = static_cast<uint32_t>(RUNTIMEPROBE_I2C_MIN_FREQ_HZ);
+static const uint32_t kMaxI2cFreqHz = static_cast<uint32_t>(RUNTIMEPROBE_I2C_MAX_FREQ_HZ);
+static const uint32_t kMinI2cTimeoutMs = static_cast<uint32_t>(RUNTIMEPROBE_I2C_MIN_TIMEOUT_MS);
+static const uint32_t kMaxI2cTimeoutMs = static_cast<uint32_t>(RUNTIMEPROBE_I2C_MAX_TIMEOUT_MS);
+static const uint32_t kJtagTdoReportIntervalMs =
+    static_cast<uint32_t>(RUNTIMEPROBE_JTAG_TDO_REPORT_INTERVAL_MS);
+
+static bool pinsAreUnique(const int *pins, size_t count, const char *context, char *err, size_t errLen) {
+  for (size_t i = 0; i < count; ++i) {
+    if (pins[i] < 0) {
+      continue;
+    }
+    for (size_t j = i + 1; j < count; ++j) {
+      if (pins[i] == pins[j]) {
+        snprintf(err, errLen, "duplicate pin %d in %s config", pins[i], context);
+        return false;
+      }
+    }
+  }
+  return true;
+}
 
 static void printHexLine(const char *prefix, const uint8_t *data, size_t len) {
   Serial.print(prefix);
@@ -119,12 +206,15 @@ bool RuntimeProbe::validatePin(int pin, char *err, size_t errLen) const {
     snprintf(err, errLen, "pin must be >= 0");
     return false;
   }
+#if defined(SOC_GPIO_PIN_COUNT)
+  if (pin >= static_cast<int>(SOC_GPIO_PIN_COUNT)) {
+    snprintf(err, errLen, "pin %d outside SoC range (0-%d)", pin, static_cast<int>(SOC_GPIO_PIN_COUNT) - 1);
+    return false;
+  }
+#endif
   if (pin >= PinRegistry::kMaxPins) {
     snprintf(err, errLen, "pin %d too large for registry", pin);
     return false;
-  }
-  if (pin > 48) {
-    Serial.printf("WARN: pin %d is outside typical ESP32-S2/S3 range (0..48).\n", pin);
   }
   return true;
 }
@@ -133,9 +223,13 @@ bool RuntimeProbe::parseInt(const char *s, int *out) const {
   if (!s || !*s) {
     return false;
   }
+  errno = 0;
   char *end = nullptr;
   long val = strtol(s, &end, 0);
-  if (!end || *end != '\0') {
+  if (!end || end == s || *end != '\0' || errno == ERANGE) {
+    return false;
+  }
+  if (val < INT_MIN || val > INT_MAX) {
     return false;
   }
   *out = static_cast<int>(val);
@@ -146,9 +240,13 @@ bool RuntimeProbe::parseUint32(const char *s, uint32_t *out) const {
   if (!s || !*s) {
     return false;
   }
+  if (s[0] == '-') {
+    return false;
+  }
+  errno = 0;
   char *end = nullptr;
-  unsigned long val = strtoul(s, &end, 0);
-  if (!end || *end != '\0') {
+  unsigned long long val = strtoull(s, &end, 0);
+  if (!end || end == s || *end != '\0' || errno == ERANGE || val > 0xFFFFFFFFULL) {
     return false;
   }
   *out = static_cast<uint32_t>(val);
@@ -156,13 +254,12 @@ bool RuntimeProbe::parseUint32(const char *s, uint32_t *out) const {
 }
 
 bool RuntimeProbe::parseByte(const char *s, uint8_t *out, char *err, size_t errLen) const {
+  uint32_t val = 0;
   if (!s || !*s) {
     snprintf(err, errLen, "missing byte");
     return false;
   }
-  char *end = nullptr;
-  unsigned long val = strtoul(s, &end, 0);
-  if (!end || *end != '\0') {
+  if (!parseUint32(s, &val)) {
     snprintf(err, errLen, "invalid byte");
     return false;
   }
@@ -175,13 +272,12 @@ bool RuntimeProbe::parseByte(const char *s, uint8_t *out, char *err, size_t errL
 }
 
 bool RuntimeProbe::parseI2cAddress(const char *s, uint8_t *out, char *err, size_t errLen) const {
+  uint32_t val = 0;
   if (!s || !*s) {
     snprintf(err, errLen, "missing i2c address");
     return false;
   }
-  char *end = nullptr;
-  unsigned long val = strtoul(s, &end, 0);
-  if (!end || *end != '\0') {
+  if (!parseUint32(s, &val)) {
     snprintf(err, errLen, "invalid i2c address");
     return false;
   }
@@ -406,29 +502,54 @@ void RuntimeProbe::uartUpdate() {
   if (uart_.txRateBps > 0) {
     const uint32_t elapsed = now - uart_.lastMicros;
     uart_.lastMicros = now;
-    uart_.txBudget += static_cast<uint64_t>(elapsed) * uart_.txRateBps;
-    size_t allowed = static_cast<size_t>(uart_.txBudget / 1000000ULL);
+    const uint64_t added = static_cast<uint64_t>(elapsed) * uart_.txRateBps;
+    if (added >= kMaxUartTxBudget || uart_.txBudget > (kMaxUartTxBudget - added)) {
+      uart_.txBudget = kMaxUartTxBudget;
+    } else {
+      uart_.txBudget += added;
+    }
+    size_t allowed = static_cast<size_t>(uart_.txBudget / kMicrosPerSecond);
+    if (allowed > kMaxUartTxBytesPerUpdate) {
+      allowed = kMaxUartTxBytesPerUpdate;
+    }
     size_t space = uart_.port->availableForWrite();
     size_t toSend = (allowed < space) ? allowed : space;
     if (toSend > 0) {
       uartSendBytes(toSend);
-      uart_.txBudget -= static_cast<uint64_t>(toSend) * 1000000ULL;
+      uart_.txBudget -= static_cast<uint64_t>(toSend) * kMicrosPerSecond;
     }
   } else {
     size_t space = uart_.port->availableForWrite();
+    if (space > kMaxUartTxBytesPerUpdate) {
+      space = kMaxUartTxBytesPerUpdate;
+    }
     if (space > 0) {
       uartSendBytes(space);
     }
   }
 
   if (uart_.echo) {
-    while (uart_.port->available()) {
-      Serial.write(uart_.port->read());
+    size_t echoed = 0;
+    while (echoed < kMaxUartRxBytesPerUpdate && uart_.port->available()) {
+      if (Serial.availableForWrite() == 0) {
+        break;
+      }
+      int value = uart_.port->read();
+      if (value < 0) {
+        break;
+      }
+      Serial.write(static_cast<uint8_t>(value));
+      echoed++;
     }
   } else {
-    while (uart_.port->available()) {
-      uart_.port->read();
+    size_t drained = 0;
+    while (drained < kMaxUartRxBytesPerUpdate && uart_.port->available()) {
+      int value = uart_.port->read();
+      if (value < 0) {
+        break;
+      }
       uart_.rxCount++;
+      drained++;
     }
     uint32_t nowMs = millis();
     if (uart_.rxCount > 0 && (nowMs - uart_.lastRxReportMs) > 1000) {
@@ -471,10 +592,11 @@ void RuntimeProbe::jtagStop() {
   jtag_.tmsPin = -1;
   jtag_.tdiPin = -1;
   jtag_.tdoPin = -1;
+  jtag_.lastTdoReportMs = 0;
 }
 
 void RuntimeProbe::jtagUpdate() {
-  if (!jtag_.active || jtag_.halfPeriodUs == 0) {
+  if (!jtag_.active || jtag_.halfPeriodUs == 0 || jtag_.seqLen == 0) {
     return;
   }
   const uint32_t now = micros();
@@ -495,7 +617,12 @@ void RuntimeProbe::jtagUpdate() {
       jtag_.tdoShift = (jtag_.tdoShift << 1) | bit;
       jtag_.tdoCount++;
       if (jtag_.tdoCount >= 64) {
-        Serial.printf("TDO 0x%016llX\n", static_cast<unsigned long long>(jtag_.tdoShift));
+        const uint32_t nowMs = millis();
+        if (static_cast<int32_t>(nowMs - jtag_.lastTdoReportMs) >=
+            static_cast<int32_t>(kJtagTdoReportIntervalMs)) {
+          Serial.printf("TDO 0x%016llX\n", static_cast<unsigned long long>(jtag_.tdoShift));
+          jtag_.lastTdoReportMs = nowMs;
+        }
         jtag_.tdoShift = 0;
         jtag_.tdoCount = 0;
       }
@@ -578,12 +705,15 @@ void RuntimeProbe::stopAllModes() {
 int RuntimeProbe::tokenize(char *line, char *argv[], int maxTokens) const {
   int argc = 0;
   char *p = line;
-  while (*p && argc < maxTokens) {
+  while (*p) {
     while (*p && isspace(static_cast<unsigned char>(*p))) {
       ++p;
     }
     if (!*p) {
       break;
+    }
+    if (argc >= maxTokens) {
+      return -1;
     }
     if (*p == '"') {
       ++p;
@@ -635,6 +765,11 @@ void RuntimeProbe::printHelp() const {
   Serial.println("  jtag stop");
   Serial.println("  i2c start <sda> <scl> [freq_hz] [timeout_ms]");
   Serial.println("  i2c start default [freq_hz] [timeout_ms]");
+  Serial.printf("    i2c limits: freq %u..%u Hz, timeout %u..%u ms\n",
+                static_cast<unsigned>(kMinI2cFreqHz),
+                static_cast<unsigned>(kMaxI2cFreqHz),
+                static_cast<unsigned>(kMinI2cTimeoutMs),
+                static_cast<unsigned>(kMaxI2cTimeoutMs));
   Serial.println("  i2c freq <hz>");
   Serial.println("  i2c timeout <ms>");
   Serial.println("  i2c scan [start] [end] | stop");
@@ -716,8 +851,12 @@ void RuntimeProbe::printStatus() const {
 }
 
 void RuntimeProbe::printPins() const {
-  Serial.println("Pin rules: negative pins are rejected; 0..48 typical for ESP32-S2/S3.");
-  Serial.println("Pins outside 0..48 are accepted with a warning.");
+  Serial.println("Pin rules:");
+#if defined(SOC_GPIO_PIN_COUNT)
+  Serial.printf("  Allowed GPIO range for this SoC: 0..%d\n", static_cast<int>(SOC_GPIO_PIN_COUNT) - 1);
+#else
+  Serial.println("  Negative pins are rejected.");
+#endif
   Serial.println("Claimed pins:");
   pins_.printClaims();
 }
@@ -1091,16 +1230,15 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
           return false;
         }
         useDefaults = true;
-      } else {
-        if (argc < 6) {
-          snprintf(err, errLen, "uart start <num> <tx_pin> <rx_pin> <baud>");
-          return false;
-        }
+      } else if (argc == 6) {
         if (!parseInt(argv[3], &txPin) || !parseInt(argv[4], &rxPin) ||
             !parseUint32(argv[5], &baud)) {
           snprintf(err, errLen, "invalid uart parameters");
           return false;
         }
+      } else {
+        snprintf(err, errLen, "uart start <num> <tx_pin> <rx_pin> <baud>");
+        return false;
       }
       if (num < 0 || num > 2) {
         snprintf(err, errLen, "uart num must be 0, 1, or 2");
@@ -1233,6 +1371,10 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
         snprintf(err, errLen, "jtag bitbang <tck> <tms> <tdi> [tdo] <freq_hz>");
         return false;
       }
+      if (argc != 6 && argc != 7) {
+        snprintf(err, errLen, "jtag bitbang <tck> <tms> <tdi> [tdo] <freq_hz>");
+        return false;
+      }
       int tck = -1, tms = -1, tdi = -1, tdo = -1;
       uint32_t freq = 0;
       if (argc == 6) {
@@ -1254,6 +1396,10 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
         return false;
       }
       if (tdo >= 0 && !validatePin(tdo, err, errLen)) {
+        return false;
+      }
+      int jtagPins[4] = {tck, tms, tdi, tdo};
+      if (!pinsAreUnique(jtagPins, 4, "jtag", err, errLen)) {
         return false;
       }
       if (freq == 0) {
@@ -1311,6 +1457,7 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
       jtag_.nextEdgeUs = micros() + jtag_.halfPeriodUs;
       jtag_.tdoShift = 0;
       jtag_.tdoCount = 0;
+      jtag_.lastTdoReportMs = millis();
       jtag_.active = true;
       return true;
     }
@@ -1372,11 +1519,29 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
         snprintf(err, errLen, "invalid i2c timeout");
         return false;
       }
+      if (argc > argIndex + 2) {
+        snprintf(err, errLen, "i2c start <sda> <scl> [freq_hz] [timeout_ms]");
+        return false;
+      }
       if (freq == 0 || timeout == 0) {
         snprintf(err, errLen, "i2c freq/timeout must be > 0");
         return false;
       }
+      if (freq < kMinI2cFreqHz || freq > kMaxI2cFreqHz) {
+        snprintf(err, errLen, "i2c frequency must be %u..%u",
+                 static_cast<unsigned>(kMinI2cFreqHz), static_cast<unsigned>(kMaxI2cFreqHz));
+        return false;
+      }
+      if (timeout < kMinI2cTimeoutMs || timeout > kMaxI2cTimeoutMs) {
+        snprintf(err, errLen, "i2c timeout must be %u..%u ms",
+                 static_cast<unsigned>(kMinI2cTimeoutMs), static_cast<unsigned>(kMaxI2cTimeoutMs));
+        return false;
+      }
       if (!validatePin(sda, err, errLen) || !validatePin(scl, err, errLen)) {
+        return false;
+      }
+      if (sda == scl) {
+        snprintf(err, errLen, "i2c sda and scl pins must differ");
         return false;
       }
       i2cStop();
@@ -1387,9 +1552,20 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
         pins_.release(sda, true);
         return false;
       }
-      Wire.begin(sda, scl, freq);
-      Wire.setClock(freq);
-      Wire.setTimeOut(timeout);
+      if (!Wire.begin(sda, scl, freq)) {
+        pins_.release(sda, true);
+        pins_.release(scl, true);
+        snprintf(err, errLen, "i2c start failed");
+        return false;
+      }
+      if (!Wire.setClock(freq)) {
+        Wire.end();
+        pins_.release(sda, true);
+        pins_.release(scl, true);
+        snprintf(err, errLen, "i2c clock configuration failed");
+        return false;
+      }
+      Wire.setTimeOut(static_cast<uint16_t>(timeout));
       i2c_.active = true;
       i2c_.sdaPin = sda;
       i2c_.sclPin = scl;
@@ -1412,7 +1588,15 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
         snprintf(err, errLen, "invalid i2c frequency");
         return false;
       }
-      Wire.setClock(freq);
+      if (freq < kMinI2cFreqHz || freq > kMaxI2cFreqHz) {
+        snprintf(err, errLen, "i2c frequency must be %u..%u",
+                 static_cast<unsigned>(kMinI2cFreqHz), static_cast<unsigned>(kMaxI2cFreqHz));
+        return false;
+      }
+      if (!Wire.setClock(freq)) {
+        snprintf(err, errLen, "i2c clock configuration failed");
+        return false;
+      }
       i2c_.freqHz = freq;
       return true;
     }
@@ -1430,7 +1614,12 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
         snprintf(err, errLen, "invalid i2c timeout");
         return false;
       }
-      Wire.setTimeOut(timeout);
+      if (timeout < kMinI2cTimeoutMs || timeout > kMaxI2cTimeoutMs) {
+        snprintf(err, errLen, "i2c timeout must be %u..%u ms",
+                 static_cast<unsigned>(kMinI2cTimeoutMs), static_cast<unsigned>(kMaxI2cTimeoutMs));
+        return false;
+      }
+      Wire.setTimeOut(static_cast<uint16_t>(timeout));
       i2c_.timeoutMs = timeout;
       return true;
     }
@@ -1667,6 +1856,10 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
       if (cs >= 0 && !validatePin(cs, err, errLen)) {
         return false;
       }
+      int spiPins[4] = {sck, miso, mosi, cs};
+      if (!pinsAreUnique(spiPins, 4, "spi", err, errLen)) {
+        return false;
+      }
       spiStop();
       if (!pins_.claim(sck, "SPI SCK", err, errLen)) {
         return false;
@@ -1769,6 +1962,10 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
         return false;
       }
       if (cs >= 0 && !validatePin(cs, err, errLen)) {
+        return false;
+      }
+      if (cs >= 0 && (cs == spi_.sckPin || cs == spi_.misoPin || cs == spi_.mosiPin)) {
+        snprintf(err, errLen, "spi cs pin must differ from sck/miso/mosi");
         return false;
       }
       if (spi_.csPin >= 0) {
@@ -1883,15 +2080,28 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
 }
 
 void RuntimeProbe::handleConsole() {
-  while (Serial.available()) {
+  size_t processed = 0;
+  while (processed < kMaxConsoleBytesPerUpdate && Serial.available()) {
+    processed++;
     const char c = static_cast<char>(Serial.read());
     if (c == '\r' || c == '\n') {
+      if (lineOverflow_) {
+        Serial.println("ERR: command too long");
+        lineLen_ = 0;
+        lineOverflow_ = false;
+        continue;
+      }
       if (lineLen_ == 0) {
         continue;
       }
       lineBuf_[lineLen_] = '\0';
       char *argv[24];
       int argc = tokenize(lineBuf_, argv, 24);
+      if (argc < 0) {
+        Serial.println("ERR: too many arguments");
+        lineLen_ = 0;
+        continue;
+      }
       if (argc == 0) {
         lineLen_ = 0;
         continue;
@@ -1904,6 +2114,7 @@ void RuntimeProbe::handleConsole() {
         Serial.println(err[0] ? err : "unknown");
       }
       lineLen_ = 0;
+      lineOverflow_ = false;
     } else if (c == '\b' || c == 0x7F) {
       if (lineLen_ > 0) {
         lineLen_--;
@@ -1911,6 +2122,8 @@ void RuntimeProbe::handleConsole() {
     } else if (isprint(static_cast<unsigned char>(c))) {
       if (lineLen_ < sizeof(lineBuf_) - 1) {
         lineBuf_[lineLen_++] = c;
+      } else {
+        lineOverflow_ = true;
       }
     }
   }
