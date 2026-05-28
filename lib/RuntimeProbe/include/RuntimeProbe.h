@@ -134,6 +134,7 @@ class RuntimeProbe {
 
   const char *modeToString(Mode mode) const;
   bool validatePin(int pin, char *err, size_t errLen) const;
+  bool validateOutputPin(int pin, char *err, size_t errLen) const;
   bool parseInt(const char *s, int *out) const;
   bool parseUint32(const char *s, uint32_t *out) const;
   bool parseByte(const char *s, uint8_t *out, char *err, size_t errLen) const;

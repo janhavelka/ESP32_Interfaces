@@ -6,6 +6,7 @@
 #include <string.h>
 #include <Wire.h>
 #include <SPI.h>
+#include "driver/gpio.h"
 #include "soc/soc_caps.h"
 
 #ifndef RUNTIMEPROBE_MAX_CONSOLE_BYTES_PER_UPDATE
@@ -216,6 +217,19 @@ bool RuntimeProbe::validatePin(int pin, char *err, size_t errLen) const {
     snprintf(err, errLen, "pin %d too large for registry", pin);
     return false;
   }
+  return true;
+}
+
+bool RuntimeProbe::validateOutputPin(int pin, char *err, size_t errLen) const {
+  if (!validatePin(pin, err, errLen)) {
+    return false;
+  }
+#if defined(GPIO_IS_VALID_OUTPUT_GPIO)
+  if (!GPIO_IS_VALID_OUTPUT_GPIO(pin)) {
+    snprintf(err, errLen, "pin %d is not output-capable", pin);
+    return false;
+  }
+#endif
   return true;
 }
 
@@ -1072,7 +1086,7 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
         snprintf(err, errLen, "invalid pin");
         return false;
       }
-      if (!validatePin(pin, err, errLen)) {
+      if (!validateOutputPin(pin, err, errLen)) {
         return false;
       }
       if (gpio_.pinClaimed) {
@@ -1261,7 +1275,7 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
         snprintf(err, errLen, "baud must be > 0");
         return false;
       }
-      if (!validatePin(txPin, err, errLen) || !validatePin(rxPin, err, errLen)) {
+      if (!validateOutputPin(txPin, err, errLen) || !validatePin(rxPin, err, errLen)) {
         return false;
       }
       HardwareSerial *port = uartByNum(static_cast<uint8_t>(num));
@@ -1391,8 +1405,8 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
           return false;
         }
       }
-      if (!validatePin(tck, err, errLen) || !validatePin(tms, err, errLen) ||
-          !validatePin(tdi, err, errLen)) {
+      if (!validateOutputPin(tck, err, errLen) || !validateOutputPin(tms, err, errLen) ||
+          !validateOutputPin(tdi, err, errLen)) {
         return false;
       }
       if (tdo >= 0 && !validatePin(tdo, err, errLen)) {
@@ -1537,7 +1551,7 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
                  static_cast<unsigned>(kMinI2cTimeoutMs), static_cast<unsigned>(kMaxI2cTimeoutMs));
         return false;
       }
-      if (!validatePin(sda, err, errLen) || !validatePin(scl, err, errLen)) {
+      if (!validateOutputPin(sda, err, errLen) || !validateOutputPin(scl, err, errLen)) {
         return false;
       }
       if (sda == scl) {
@@ -1849,11 +1863,11 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
           return false;
         }
       }
-      if (!validatePin(sck, err, errLen) || !validatePin(miso, err, errLen) ||
-          !validatePin(mosi, err, errLen)) {
+      if (!validateOutputPin(sck, err, errLen) || !validatePin(miso, err, errLen) ||
+          !validateOutputPin(mosi, err, errLen)) {
         return false;
       }
-      if (cs >= 0 && !validatePin(cs, err, errLen)) {
+      if (cs >= 0 && !validateOutputPin(cs, err, errLen)) {
         return false;
       }
       int spiPins[4] = {sck, miso, mosi, cs};
@@ -1961,7 +1975,7 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
         snprintf(err, errLen, "invalid cs pin");
         return false;
       }
-      if (cs >= 0 && !validatePin(cs, err, errLen)) {
+      if (cs >= 0 && !validateOutputPin(cs, err, errLen)) {
         return false;
       }
       if (cs >= 0 && (cs == spi_.sckPin || cs == spi_.misoPin || cs == spi_.mosiPin)) {
