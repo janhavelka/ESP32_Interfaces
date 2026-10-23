@@ -1,6 +1,9 @@
 // README snippet (Serial console examples):
 //   mode gpio
 //   gpio set 5
+//   gpio read                 // Sample selected input: GPIO pin 5 = 0 or 1
+//   gpio high
+//   gpio read                 // Physical level; does not change drive/waveform
 //   gpio toggle 100000
 //   gpio pulse 5 20
 //   mode uart

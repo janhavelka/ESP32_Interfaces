@@ -764,6 +764,7 @@ void RuntimeProbe::printHelp() const {
   Serial.println("  gpio toggle <freq_hz>");
   Serial.println("  gpio pulse <width_us> <period_us>");
   Serial.println("  gpio high|low");
+  Serial.println("  gpio read (sample the selected pin)");
   Serial.println("  gpio safe <0|1|input>");
   Serial.println("  gpio stop");
   Serial.println("  uart force <0|1>");
@@ -1186,6 +1187,19 @@ bool RuntimeProbe::handleCommand(int argc, char *argv[], char *err, size_t errLe
       }
       snprintf(err, errLen, "gpio safe expects 0, 1, or input");
       return false;
+    }
+    if (strcmp(argv[1], "read") == 0) {
+      if (argc != 2) {
+        snprintf(err, errLen, "gpio read takes no arguments");
+        return false;
+      }
+      if (!gpio_.pinClaimed || gpio_.pin < 0) {
+        snprintf(err, errLen, "no gpio pin set (use gpio set <pin>)");
+        return false;
+      }
+      const int level = digitalRead(gpio_.pin);
+      Serial.printf("GPIO pin %d = %d\n", gpio_.pin, level);
+      return true;
     }
     if (strcmp(argv[1], "stop") == 0) {
       gpioReleasePin();
