@@ -32,3 +32,9 @@
 - When using subagents, the lead owns Git mutations for their shared work.
 - Confirm upstream synchronization. Follow the CI and local verification policy
   above; report conflicts or sync failures and never force-push to resolve them.
+
+## Commit and pull request attribution
+
+Credit human contributors for their work. Omit AI co-author trailers, AI-generated
+signatures or sign-offs, generated-by footers, session links, and other AI
+attribution from commit messages and pull request titles and descriptions.
